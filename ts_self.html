@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>本地文档倒排索引系统</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; background: #f8f9fa; color: #333; }
+        
+        /* 顶部控制区 */
+        .control-panel { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); margin-bottom: 25px; }
+        h1 { margin-top: 0; font-size: 24px; display: flex; align-items: center; gap: 10px; }
+        
+        /* 文件上传按钮美化 */
+        .file-upload-wrapper { margin: 20px 0; padding: 20px; border: 2px dashed #cbd5e0; border-radius: 8px; text-align: center; background: #f7fafc; transition: all 0.3s; }
+        .file-upload-wrapper:hover { border-color: #4299e1; background: #ebf8ff; }
+        .file-upload-label { cursor: pointer; color: #4299e1; font-weight: bold; font-size: 16px; }
+        #folderInput { display: none; }
+        .stats { font-size: 14px; color: #718096; margin-top: 10px; }
+
+        /* 搜索框 */
+        .search-box { width: 100%; padding: 15px; font-size: 18px; border: 2px solid #e2e8f0; border-radius: 8px; box-sizing: border-box; margin-top: 15px; transition: border-color 0.2s; }
+        .search-box:focus { border-color: #4299e1; outline: none; box-shadow: 0 0 0 3px rgba(66, 153, 225, 0.2); }
+        .search-box:disabled { background-color: #edf2f7; cursor: not-allowed; }
+
+        /* 结果列表 */
+        .result-item { background: white; padding: 15px 20px; border-radius: 8px; margin-bottom: 12px; border-left: 4px solid transparent; box-shadow: 0 2px 4px rgba(0,0,0,0.02); cursor: pointer; transition: transform 0.2s; }
+        .result-item:hover { transform: translateX(5px); border-left-color: #4299e1; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        .result-title { font-size: 16px; font-weight: 600; color: #2d3748; margin-bottom: 6px; display: flex; justify-content: space-between; }
+        .result-path { font-size: 12px; color: #a0aec0; font-family: monospace; margin-bottom: 8px; }
+        .result-snippet { font-size: 14px; color: #4a5568; line-height: 1.6; background: #fffaf0; padding: 8px; border-radius: 4px; }
+        
+        /* 高亮样式 */
+        .highlight { background-color: #fefcbf; color: #744210; font-weight: bold; padding: 0 2px; border-radius: 2px; }
+        .score-badge { background: #edf2f7; padding: 2px 8px; border-radius: 12px; font-size: 12px; color: #4a5568; }
+
+        /* 加载动画 */
+        .loading { display: none; color: #4299e1; font-weight: bold; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+    <div class="control-panel">
+        <h1>📂 本地文档检索引擎 <span style="font-size:12px; background:#48bb78; color:white; padding:2px 6px; border-radius:4px;">Inverted Index Powered</span></h1>
+        
+        <div class="file-upload-wrapper" id="dropZone">
+            <label for="folderInput" class="file-upload-label">
+                📁 点击选择文件夹 (或将文件夹拖入此处)
+            </label>
+            <p style="font-size:12px; color:#718096; margin: 5px 0;">仅支持读取 .txt, .md, .json, .js, .html 等文本文件</p>
+            <input type="file" id="folderInput" webkitdirectory multiple>
+            <div class="loading" id="loadingMsg">正在建立倒排索引，请稍候...</div>
+            <div class="stats" id="statsMsg">等待导入数据...</div>
+        </div>
+
+        <input type="text" id="searchInput" class="search-box" placeholder="请先导入文件夹..." disabled>
+    </div>
+
+    <div id="results"></div>
+
+    <script>
+        // ============================================================
+        // 核心算法：倒排索引 (Inverted Index) + 模糊匹配
+        // ============================================================
+        class InvertedIndexEngine {
+            constructor() {
+                this.index = new Map(); // 倒排表: { "单词": [文档ID1, 文档ID2] }
+                this.documents = new Map(); // 正向表: { 文档ID: 文档对象 }
+                this.docCount = 0;
+            }
+
+            // 分词器：将文本拆分为单词数组 (支持中文和英文)
+            tokenize(text) {
+                // 这是一个简单的分词正则：匹配中文、英文单词、数字
+                // 把所有标点符号都当成分隔符
+                return text.toLowerCase().match(/[\u4e00-\u9fa5]|[a-zA-Z0-9]+/g) || [];
+            }
+
+            // 添加文档到索引
+            addDocument(fileObj, content) {
+                const docId = ++this.docCount;
+                const tokens = this.tokenize(content);
+                
+                // 1. 存入正向表 (用于展示结果)
+                this.documents.set(docId, {
+                    id: docId,
+                    name: fileObj.name,
+                    path: fileObj.webkitRelativePath || fileObj.name,
+                    content: content,
+                    fileRef: fileObj // 保存文件引用，用于打开
+                });
+
+                // 2. 存入倒排表 (核心步骤)
+                // Set 用于去重：如果一个词在文档里出现多次，索引里只存一次ID
+                const uniqueTokens = new Set(tokens);
+                uniqueTokens.forEach(token => {
+                    if (!this.index.has(token)) {
+                        this.index.set(token, []);
+                    }
+                    this.index.get(token).push(docId);
+                });
+            }
+
+            // 搜索函数
+            search(query) {
+                if (!query.trim()) return [];
+                
+                const queryTokens = this.tokenize(query);
+                const docScores = new Map(); // { docId: 分数 }
+
+                // 遍历查询词
+                queryTokens.forEach(qToken => {
+                    // -----------------------------------------
+                    // 模糊匹配逻辑 (Fuzzy Strategy)
+                    // -----------------------------------------
+                    // 我们不仅查找完全相等的词，还查找包含查询词的索引词
+                    // 例如：搜 "net"，倒排表里的 "network", "internet" 都会被命中
+                    
+                    for (const [idxToken, docIds] of this.index) {
+                        let matchScore = 0;
+
+                        if (idxToken === qToken) {
+                            matchScore = 10; // 精确匹配权重高
+                        } else if (idxToken.includes(qToken)) {
+                            matchScore = 3;  // 模糊包含权重低
+                        }
+
+                        if (matchScore > 0) {
+                            docIds.forEach(id => {
+                                const currentScore = docScores.get(id) || 0;
+                                docScores.set(id, currentScore + matchScore);
+                            });
+                        }
+                    }
+                });
+
+                // 将结果转换为数组并排序
+                const results = [];
+                docScores.forEach((score, id) => {
+                    results.push({
+                        ...this.documents.get(id),
+                        score: score
+                    });
+                });
+
+                return results.sort((a, b) => b.score - a.score);
+            }
+        }
+
+        // ============================================================
+        // 应用逻辑 (UI 交互)
+        // ============================================================
+        const engine = new InvertedIndexEngine();
+        const folderInput = document.getElementById('folderInput');
+        const searchInput = document.getElementById('searchInput');
+        const resultsDiv = document.getElementById('results');
+        const loadingMsg = document.getElementById('loadingMsg');
+        const statsMsg = document.getElementById('statsMsg');
+
+        // 处理文件导入
+        folderInput.addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files);
+            if (files.length === 0) return;
+
+            // UI 状态更新
+            loadingMsg.style.display = 'block';
+            searchInput.disabled = true;
+            statsMsg.innerText = `正在分析 ${files.length} 个文件...`;
+
+            let processedCount = 0;
+            const startTime = performance.now();
+
+            // 异步读取文件内容
+            for (const file of files) {
+                // 简单的过滤：只读文本类文件，防止读取图片/exe乱码
+                if (file.size < 1000000 && isTextFile(file.name)) { 
+                    try {
+                        const text = await readFileAsText(file);
+                        engine.addDocument(file, text);
+                    } catch (err) {
+                        console.warn(`无法读取文件 ${file.name}:`, err);
+                    }
+                }
+                processedCount++;
+            }
+
+            const endTime = performance.now();
+            const duration = (endTime - startTime).toFixed(2);
+
+            // 完成
+            loadingMsg.style.display = 'none';
+            searchInput.disabled = false;
+            searchInput.placeholder = `在 ${engine.docCount} 个文档中搜索...`;
+            statsMsg.innerText = `索引建立完成！耗时 ${duration}ms，有效文档 ${engine.docCount} 个。`;
+        });
+
+        // 搜索输入监听
+        searchInput.addEventListener('input', (e) => {
+            const query = e.target.value;
+            const results = engine.search(query);
+            renderResults(results, query);
+        });
+
+        // 辅助函数：判断是否为文本文件
+        function isTextFile(filename) {
+            const ext = filename.split('.').pop().toLowerCase();
+            const textExts = ['txt', 'md', 'js', 'html', 'css', 'json', 'py', 'java', 'c', 'cpp', 'log', 'csv'];
+            return textExts.includes(ext);
+        }
+
+        // 辅助函数：Promise 封装 FileReader
+        function readFileAsText(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(e.target.result);
+                reader.onerror = (e) => reject(e);
+                reader.readAsText(file);
+            });
+        }
+
+        // 辅助函数：提取摘要 (Snippet)
+        function getSnippet(text, query) {
+            if (!query) return text.substring(0, 100) + '...';
+            // 找到第一个匹配词的位置
+            const matchIndex = text.toLowerCase().indexOf(query.toLowerCase().split(' ')[0]);
+            if (matchIndex === -1) return text.substring(0, 100) + '...';
+            
+            const start = Math.max(0, matchIndex - 30);
+            const end = Math.min(text.length, matchIndex + 100);
+            return '...' + text.substring(start, end) + '...';
+        }
+
+        // 辅助函数：高亮文本
+        function highlight(text, query) {
+            if (!query) return text;
+            const terms = query.toLowerCase().split(/\s+/).filter(t=>t);
+            let html = text;
+            terms.forEach(term => {
+                // 简单的正则替换 (注意：这里为了演示简化了正则特殊字符处理)
+                const regex = new RegExp(`(${term})`, 'gi');
+                html = html.replace(regex, '<span class="highlight">$1</span>');
+            });
+            return html;
+        }
+
+        // 渲染结果
+        function renderResults(results, query) {
+            if (!query) { resultsDiv.innerHTML = ''; return; }
+            if (results.length === 0) {
+                resultsDiv.innerHTML = '<div style="text-align:center; color:#a0aec0; padding:20px;">没有找到匹配的文档</div>';
+                return;
+            }
+
+            resultsDiv.innerHTML = results.map(doc => {
+                // 生成 Blob URL 用于打开文件
+                const blobUrl = URL.createObjectURL(doc.fileRef);
+                
+                return `
+                    <div class="result-item" onclick="window.open('${blobUrl}', '_blank')">
+                        <div class="result-title">
+                            ${highlight(doc.name, query)}
+                            <span class="score-badge">Score: ${doc.score}</span>
+                        </div>
+                        <div class="result-path">${doc.path}</div>
+                        <div class="result-snippet">${highlight(getSnippet(doc.content, query), query)}</div>
+                    </div>
+                `;
+            }).join('');
+        }
+    </script>
+</body>
+</html>
