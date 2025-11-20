@@ -62,95 +62,127 @@
         // ============================================================
         // 核心算法：倒排索引 (Inverted Index) + 模糊匹配
         // ============================================================
-        class InvertedIndexEngine {
-            constructor() {
-                this.index = new Map(); // 倒排表: { "单词": [文档ID1, 文档ID2] }
-                this.documents = new Map(); // 正向表: { 文档ID: 文档对象 }
-                this.docCount = 0;
-            }
+       const STOP_WORDS = new Set([
+        "的", "了", "和", "是", "在", "我", "有", "就", "不", "人", "都", "一", "一个", "上", "也", "很", "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好", "自己", "这",
+        "the", "is", "at", "which", "on", "in", "a", "an", "and", "or", "of", "to", "it", "that", "for", "with", "as", "by"
+    ]);
 
-            // 分词器：将文本拆分为单词数组 (支持中文和英文)
-            tokenize(text) {
-                // 这是一个简单的分词正则：匹配中文、英文单词、数字
-                // 把所有标点符号都当成分隔符
-                return text.toLowerCase().match(/[\u4e00-\u9fa5]|[a-zA-Z0-9]+/g) || [];
-            }
+    class AdvancedSearchEngine {
+        constructor() {
+            this.index = new Map(); // 倒排表: { "单词": { docId: TF值, ... } }
+            this.documents = new Map(); // 正向表
+            this.docCount = 0; // N (文档总数)
+        }
 
-            // 添加文档到索引
-            addDocument(fileObj, content) {
-                const docId = ++this.docCount;
-                const tokens = this.tokenize(content);
-                
-                // 1. 存入正向表 (用于展示结果)
-                this.documents.set(docId, {
-                    id: docId,
-                    name: fileObj.name,
-                    path: fileObj.webkitRelativePath || fileObj.name,
-                    content: content,
-                    fileRef: fileObj // 保存文件引用，用于打开
-                });
+        tokenize(text) {
+            // 1. 分词 (中文+英文单词)
+            let tokens = text.toLowerCase().match(/[\u4e00-\u9fa5]|[a-zA-Z0-9]+/g) || [];
+            // 2. 停用词过滤 (Stopwords Removal)
+            return tokens.filter(t => !STOP_WORDS.has(t));
+        }
 
-                // 2. 存入倒排表 (核心步骤)
-                // Set 用于去重：如果一个词在文档里出现多次，索引里只存一次ID
-                const uniqueTokens = new Set(tokens);
-                uniqueTokens.forEach(token => {
-                    if (!this.index.has(token)) {
-                        this.index.set(token, []);
-                    }
-                    this.index.get(token).push(docId);
-                });
-            }
+        addDocument(fileObj, content) {
+            const docId = ++this.docCount;
+            
+            // 简单模拟：给予标题更高的 TF 权重 (Field Boosting)
+            // 我们把标题里的词重复加入 5 次，变相提高它的 TF
+            const titleContent = (fileObj.name + " ").repeat(5);
+            const fullText = titleContent + content;
+            
+            const tokens = this.tokenize(fullText);
+            const tokenCounts = {}; // 计算当前文档的 TF
 
-            // 搜索函数
-            search(query) {
-                if (!query.trim()) return [];
-                
-                const queryTokens = this.tokenize(query);
-                const docScores = new Map(); // { docId: 分数 }
+            tokens.forEach(token => {
+                tokenCounts[token] = (tokenCounts[token] || 0) + 1;
+            });
 
-                // 遍历查询词
-                queryTokens.forEach(qToken => {
-                    // -----------------------------------------
-                    // 模糊匹配逻辑 (Fuzzy Strategy)
-                    // -----------------------------------------
-                    // 我们不仅查找完全相等的词，还查找包含查询词的索引词
-                    // 例如：搜 "net"，倒排表里的 "network", "internet" 都会被命中
-                    
-                    for (const [idxToken, docIds] of this.index) {
-                        let matchScore = 0;
+            // 存入正向表
+            this.documents.set(docId, {
+                id: docId,
+                name: fileObj.name,
+                path: fileObj.webkitRelativePath || fileObj.name,
+                content: content,
+                fileRef: fileObj,
+                length: tokens.length // 记录文档长度 (为未来做 BM25 预留)
+            });
 
-                        if (idxToken === qToken) {
-                            matchScore = 10; // 精确匹配权重高
-                        } else if (idxToken.includes(qToken)) {
-                            matchScore = 3;  // 模糊包含权重低
-                        }
-
-                        if (matchScore > 0) {
-                            docIds.forEach(id => {
-                                const currentScore = docScores.get(id) || 0;
-                                docScores.set(id, currentScore + matchScore);
-                            });
-                        }
-                    }
-                });
-
-                // 将结果转换为数组并排序
-                const results = [];
-                docScores.forEach((score, id) => {
-                    results.push({
-                        ...this.documents.get(id),
-                        score: score
-                    });
-                });
-
-                return results.sort((a, b) => b.score - a.score);
+            // 存入倒排表
+            for (const [token, tf] of Object.entries(tokenCounts)) {
+                if (!this.index.has(token)) {
+                    this.index.set(token, new Map()); // Map<docId, TF>
+                }
+                this.index.get(token).set(docId, tf);
             }
         }
+
+        search(query) {
+            if (!query.trim()) return [];
+            
+            const queryTokens = this.tokenize(query);
+            const docScores = new Map(); // { docId: FinalScore }
+
+            // 遍历查询词
+            queryTokens.forEach(qToken => {
+                // -----------------------------------------
+                // 策略重点：TF-IDF 计算
+                // -----------------------------------------
+                
+                // 1. 查找包含该词的文档列表
+                // 简单模糊策略：如果我们找不到精确的词，尝试查找索引中包含该词的项
+                // (为了性能，这里我们主要演示精确匹配的 TF-IDF，模糊匹配逻辑同前)
+                
+                // 遍历索引中的所有词 (实际生产中这步太慢，通常用 Trie 树或 FST 优化，这里为了演示逻辑简化)
+                for (const [idxToken, docMap] of this.index) {
+                    let matchWeight = 0;
+
+                    if (idxToken === qToken) matchWeight = 1.0; // 精确匹配
+                    else if (idxToken.includes(qToken)) matchWeight = 0.3; // 模糊匹配权重降低
+
+                    if (matchWeight > 0) {
+                        // =======================================
+                        // 核心公式：IDF 计算
+                        // IDF = log(N / df)
+                        // N = this.docCount (总文档数)
+                        // df = docMap.size (包含该词的文档数)
+                        // =======================================
+                        const df = docMap.size;
+                        const idf = Math.log10(this.docCount / (df + 1)) + 1; // +1 防止分母为0
+
+                        docMap.forEach((tf, docId) => {
+                            // ===================================
+                            // 核心公式：TF * IDF
+                            // ===================================
+                            // 可以在这里加入 Log 归一化 TF: (1 + log(tf))
+                            const tfScore = tf; 
+                            const score = tfScore * idf * matchWeight;
+
+                            const currentScore = docScores.get(docId) || 0;
+                            docScores.set(docId, currentScore + score);
+                        });
+                    }
+                }
+            });
+
+            // 组装结果
+            const results = [];
+            docScores.forEach((score, id) => {
+                results.push({
+                    ...this.documents.get(id),
+                    score: score.toFixed(4) // 保留4位小数方便观察
+                });
+            });
+
+            return results.sort((a, b) => b.score - a.score);
+        }
+    }
+
+    // 替换原来的初始化
+    const engine = new AdvancedSearchEngine()
 
         // ============================================================
         // 应用逻辑 (UI 交互)
         // ============================================================
-        const engine = new InvertedIndexEngine();
+      
         const folderInput = document.getElementById('folderInput');
         const searchInput = document.getElementById('searchInput');
         const resultsDiv = document.getElementById('results');
